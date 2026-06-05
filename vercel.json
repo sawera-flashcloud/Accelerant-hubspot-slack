@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "api/hubspot-activity.py", "use": "@vercel/python" }
+  ],
+  "routes": [
+    { "src": "/api/hubspot-activity", "dest": "api/hubspot-activity.py" }
+  ]
+}
