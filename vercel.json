@@ -8,9 +8,6 @@
     }
   ],
   "routes": [
-    { "src": "/notify", "dest": "api/index.py" },
-    { "src": "/trigger", "dest": "api/index.py" },
-    { "src": "/health", "dest": "api/index.py" },
-    { "src": "/api/hubspot-activity", "dest": "api/hubspot-activity.py" }
+    { "src": "/(.*)", "dest": "api/index.py" }
   ]
 }
