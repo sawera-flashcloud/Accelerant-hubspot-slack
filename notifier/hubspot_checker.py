@@ -9,6 +9,32 @@ from . import slack
 HUBSPOT_TOKEN = os.getenv("HUBSPOT_ACCESS_TOKEN")
 HUBSPOT_BASE = "https://api.hubapi.com"
 
+# Cache for owner IDs → names
+_owner_cache: dict[str, str] = {}
+
+
+async def _resolve_owner_name(owner_id: str) -> str:
+    """Look up an owner ID and return their name. Results are cached."""
+    if not owner_id:
+        return "Unassigned"
+    if owner_id in _owner_cache:
+        return _owner_cache[owner_id]
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{HUBSPOT_BASE}/crm/v3/owners/{owner_id}", headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                first = data.get("firstName", "")
+                last = data.get("lastName", "")
+                name = f"{first} {last}".strip() or owner_id
+                _owner_cache[owner_id] = name
+                return name
+    except Exception:
+        pass
+    _owner_cache[owner_id] = owner_id
+    return owner_id
+
 
 async def get_recent_deals(hours: int = 24, limit: int = 10) -> list[dict]:
     """Fetch recently created/modified deals from HubSpot."""
@@ -89,7 +115,8 @@ def build_deal_fields(deal: dict) -> tuple[str, str, list, str]:
     name = props.get("dealname", "Untitled deal")
     amount = props.get("amount", "Not set")
     stage = props.get("dealstage", "Unknown")
-    owner = props.get("hubspot_owner_id", "Unassigned")
+    owner_raw = props.get("hubspot_owner_id", "")
+    owner = _owner_cache.get(owner_raw, owner_raw) if owner_raw else "Unassigned"
 
     title = f"💼 Deal: {name}"
     message = f"${amount} | Stage: {stage} | Owner: {owner}"
@@ -124,9 +151,31 @@ def build_contact_fields(contact: dict) -> tuple[str, str, list, str]:
     return title, message, fields, url
 
 
+async def _load_owners() -> None:
+    """Pre-load all HubSpot owners into the cache."""
+    if _owner_cache:
+        return  # already loaded
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"{HUBSPOT_BASE}/crm/v3/owners", headers=headers)
+            if resp.status_code == 200:
+                for owner in resp.json().get("results", []):
+                    oid = owner.get("id")
+                    first = owner.get("firstName", "")
+                    last = owner.get("lastName", "")
+                    if oid:
+                        _owner_cache[str(oid)] = f"{first} {last}".strip() or str(oid)
+    except Exception:
+        pass
+
+
 async def check_and_notify(hours: int = 24) -> dict:
     """Check HubSpot for recent activity and send Slack notifications."""
     results = {"deals_sent": 0, "contacts_sent": 0, "errors": []}
+
+    # Pre-load owner names so Slack shows real names, not IDs
+    await _load_owners()
 
     # Check deals
     try:
