@@ -2,6 +2,7 @@
 import os
 import json
 import httpx
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,11 +11,13 @@ from . import slack
 HUBSPOT_TOKEN = os.getenv("HUBSPOT_ACCESS_TOKEN")
 HUBSPOT_BASE = "https://api.hubapi.com"
 
-# Cache for owner IDs → names
 _owner_cache: dict[str, str] = {}
 
-# State file path for dedup (stores last-seen timestamps)
-_STATE_FILE = Path(__file__).parent / ".dedup_state.json"
+# Find a writable location for dedup state
+if Path("/tmp").exists():
+    _STATE_FILE = Path("/tmp") / ".hubspot_dedup_state.json"
+else:
+    _STATE_FILE = Path(__file__).parent / ".dedup_state.json"
 
 
 def _load_state() -> dict:
@@ -27,7 +30,10 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
-    _STATE_FILE.write_text(json.dumps(state, indent=2))
+    try:
+        _STATE_FILE.write_text(json.dumps(state, indent=2))
+    except OSError:
+        pass  # read-only filesystem (Vercel serverless) — best-effort only
 
 
 def _get_since(state_key: str, fallback_hours: int = 48) -> str:
