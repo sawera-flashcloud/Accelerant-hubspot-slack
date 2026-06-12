@@ -1,9 +1,16 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/hubspot-activity.py", "use": "@vercel/python" }
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": { "maxLambdaSize": "15mb" }
+    }
   ],
   "routes": [
+    { "src": "/notify", "dest": "api/index.py" },
+    { "src": "/trigger", "dest": "api/index.py" },
+    { "src": "/health", "dest": "api/index.py" },
     { "src": "/api/hubspot-activity", "dest": "api/hubspot-activity.py" }
   ]
 }
