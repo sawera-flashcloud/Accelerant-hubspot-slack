@@ -1,5 +1,8 @@
+.venv/
 __pycache__/
 *.pyc
 .env
-node_modules/
-.DS_Store
+test_local.py
+notifier/test_all.py
+notifier/.env
+notifier/__pycache__/
