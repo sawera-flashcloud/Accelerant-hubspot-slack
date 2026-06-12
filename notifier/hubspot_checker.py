@@ -1,8 +1,9 @@
-"""Check HubSpot for recent activity and send notifications."""
+"""Check HubSpot for recent activity and send notifications — with dedup."""
 import os
+import json
 import httpx
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from pathlib import Path
 
 from . import slack
 
@@ -12,149 +13,53 @@ HUBSPOT_BASE = "https://api.hubapi.com"
 # Cache for owner IDs → names
 _owner_cache: dict[str, str] = {}
 
-
-async def _resolve_owner_name(owner_id: str) -> str:
-    """Look up an owner ID and return their name. Results are cached."""
-    if not owner_id:
-        return "Unassigned"
-    if owner_id in _owner_cache:
-        return _owner_cache[owner_id]
-    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{HUBSPOT_BASE}/crm/v3/owners/{owner_id}", headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                first = data.get("firstName", "")
-                last = data.get("lastName", "")
-                name = f"{first} {last}".strip() or owner_id
-                _owner_cache[owner_id] = name
-                return name
-    except Exception:
-        pass
-    _owner_cache[owner_id] = owner_id
-    return owner_id
+# State file path for dedup (stores last-seen timestamps)
+_STATE_FILE = Path(__file__).parent / ".dedup_state.json"
 
 
-async def get_recent_deals(hours: int = 24, limit: int = 10) -> list[dict]:
-    """Fetch recently created/modified deals from HubSpot."""
-    if not HUBSPOT_TOKEN:
-        raise RuntimeError("HUBSPOT_ACCESS_TOKEN not set")
-
-    after = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-
-    headers = {
-        "Authorization": f"Bearer {HUBSPOT_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    body = {
-        "limit": limit,
-        "filterGroups": [{
-            "filters": [{
-                "propertyName": "hs_lastmodifieddate",
-                "operator": "GTE",
-                "value": after
-            }]
-        }],
-        "properties": ["dealname", "amount", "dealstage", "hubspot_owner_id", "createdate"],
-        "sorts": [{"propertyName": "hs_lastmodifieddate", "direction": "DESCENDING"}]
-    }
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{HUBSPOT_BASE}/crm/v3/objects/deals/search",
-            headers=headers,
-            json=body
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("results", [])
+def _load_state() -> dict:
+    if _STATE_FILE.exists():
+        try:
+            return json.loads(_STATE_FILE.read_text())
+        except Exception:
+            pass
+    return {"last_deal_time": None, "last_contact_time": None}
 
 
-async def get_recent_contacts(hours: int = 24, limit: int = 10) -> list[dict]:
-    """Fetch recently created/modified contacts."""
-    if not HUBSPOT_TOKEN:
-        raise RuntimeError("HUBSPOT_ACCESS_TOKEN not set")
-
-    after = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-
-    headers = {
-        "Authorization": f"Bearer {HUBSPOT_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    body = {
-        "limit": limit,
-        "filterGroups": [{
-            "filters": [{
-                "propertyName": "hs_lastmodifieddate",
-                "operator": "GTE",
-                "value": after
-            }]
-        }],
-        "properties": ["email", "firstname", "lastname", "createdate", "hs_lead_status"],
-        "sorts": [{"propertyName": "hs_lastmodifieddate", "direction": "DESCENDING"}]
-    }
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{HUBSPOT_BASE}/crm/v3/objects/contacts/search",
-            headers=headers,
-            json=body
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("results", [])
+def _save_state(state: dict) -> None:
+    _STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def build_deal_fields(deal: dict) -> tuple[str, str, list, str]:
-    """Extract Slack fields from a HubSpot deal."""
-    props = deal.get("properties", {})
-    deal_id = deal.get("id", "?")
-    name = props.get("dealname", "Untitled deal")
-    amount = props.get("amount", "Not set")
-    stage = props.get("dealstage", "Unknown")
-    owner_raw = props.get("hubspot_owner_id", "")
-    owner = _owner_cache.get(owner_raw, owner_raw) if owner_raw else "Unassigned"
-
-    title = f"💼 Deal: {name}"
-    message = f"${amount} | Stage: {stage} | Owner: {owner}"
-    fields = [
-        {"type": "mrkdwn", "text": f"*Deal:* {name}"},
-        {"type": "mrkdwn", "text": f"*Amount:* ${amount}"},
-        {"type": "mrkdwn", "text": f"*Stage:* {stage}"},
-        {"type": "mrkdwn", "text": f"*Owner:* {owner}"},
-    ]
-    url = f""
-    return title, message, fields, url
+def _get_since(state_key: str, fallback_hours: int = 48) -> str:
+    """Return the ISO timestamp to filter by — either last seen or fallback window."""
+    state = _load_state()
+    last = state.get(state_key)
+    if last:
+        return last
+    return (datetime.now(timezone.utc) - timedelta(hours=fallback_hours)).isoformat()
 
 
-def build_contact_fields(contact: dict) -> tuple[str, str, list, str]:
-    """Extract Slack fields from a HubSpot contact."""
-    props = contact.get("properties", {})
-    contact_id = contact.get("id", "?")
-    first = props.get("firstname", "")
-    last = props.get("lastname", "")
-    email = props.get("email", "No email")
-    lead_status = props.get("hs_lead_status", "Unknown")
-
-    name = f"{first} {last}".strip() or "Unnamed contact"
-    title = f"👤 Contact: {name}"
-    message = f"{email} | Status: {lead_status}"
-    fields = [
-        {"type": "mrkdwn", "text": f"*Name:* {name}"},
-        {"type": "mrkdwn", "text": f"*Email:* {email}"},
-        {"type": "mrkdwn", "text": f"*Lead Status:* {lead_status}"},
-    ]
-    url = f""
-    return title, message, fields, url
+def _update_latest(state_key: str, items: list[dict], prop: str = "hs_lastmodifieddate") -> None:
+    """Update the dedup state with the newest timestamp from fetched items."""
+    if not items:
+        return
+    timestamps = []
+    for item in items:
+        val = item.get("properties", {}).get(prop)
+        if val:
+            timestamps.append(val)
+    if timestamps:
+        timestamps.sort(reverse=True)
+        state = _load_state()
+        # Add 1 second so we don't re-fetch the same record
+        state[state_key] = timestamps[0]
+        _save_state(state)
 
 
 async def _load_owners() -> None:
     """Pre-load all HubSpot owners into the cache."""
     if _owner_cache:
-        return  # already loaded
+        return
     headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -170,30 +75,114 @@ async def _load_owners() -> None:
         pass
 
 
-async def check_and_notify(hours: int = 24) -> dict:
-    """Check HubSpot for recent activity and send Slack notifications."""
+def _search_body(prop: str, since: str, extra_props: list, limit: int = 100) -> dict:
+    return {
+        "limit": limit,
+        "filterGroups": [{
+            "filters": [{
+                "propertyName": prop,
+                "operator": "GT",
+                "value": since
+            }]
+        }],
+        "properties": extra_props + [prop, "createdate"],
+        "sorts": [{"propertyName": prop, "direction": "DESCENDING"}]
+    }
+
+
+async def _fetch_objects(obj_type: str, body: dict) -> list[dict]:
+    """Generic HubSpot CRM search."""
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{HUBSPOT_BASE}/crm/v3/objects/{obj_type}/search",
+            headers=headers,
+            json=body
+        )
+        resp.raise_for_status()
+        return resp.json().get("results", [])
+
+
+# ─── Deal helpers ─────────────────────────────────────────
+
+DEAL_PROPS = ["dealname", "amount", "dealstage", "hubspot_owner_id"]
+
+
+def build_deal_fields(deal: dict) -> tuple[str, str, list, str]:
+    props = deal.get("properties", {})
+    name = props.get("dealname", "Untitled deal")
+    amount = props.get("amount", "Not set")
+    stage = props.get("dealstage", "Unknown")
+    owner_raw = props.get("hubspot_owner_id", "")
+    owner = _owner_cache.get(owner_raw, owner_raw) if owner_raw else "Unassigned"
+
+    title = f"💼 Deal: {name}"
+    fields = [
+        {"type": "mrkdwn", "text": f"*Deal:* {name}"},
+        {"type": "mrkdwn", "text": f"*Amount:* ${amount}"},
+        {"type": "mrkdwn", "text": f"*Stage:* {stage}"},
+        {"type": "mrkdwn", "text": f"*Owner:* {owner}"},
+    ]
+    return title, f"${amount} | Stage: {stage}", fields, ""
+
+
+# ─── Contact helpers ──────────────────────────────────────
+
+CONTACT_PROPS = ["firstname", "lastname", "email", "hs_lead_status"]
+
+
+def build_contact_fields(contact: dict) -> tuple[str, str, list, str]:
+    props = contact.get("properties", {})
+    first = props.get("firstname", "")
+    last = props.get("lastname", "")
+    email = props.get("email", "No email")
+    lead_status = props.get("hs_lead_status", "Unknown")
+    name = f"{first} {last}".strip() or "Unnamed contact"
+
+    title = f"👤 Contact: {name}"
+    fields = [
+        {"type": "mrkdwn", "text": f"*Name:* {name}"},
+        {"type": "mrkdwn", "text": f"*Email:* {email}"},
+        {"type": "mrkdwn", "text": f"*Lead Status:* {lead_status}"},
+    ]
+    return title, f"{email} | {lead_status}", fields, ""
+
+
+# ─── Main check ───────────────────────────────────────────
+
+async def check_and_notify(fallback_hours: int = 48) -> dict:
+    """Check HubSpot for *new* activity (since last run) and send to Slack."""
     results = {"deals_sent": 0, "contacts_sent": 0, "errors": []}
 
-    # Pre-load owner names so Slack shows real names, not IDs
     await _load_owners()
 
-    # Check deals
+    # ── Deals ──
     try:
-        deals = await get_recent_deals(hours=hours)
+        since = _get_since("last_deal_time", fallback_hours)
+        body = _search_body("hs_lastmodifieddate", since, DEAL_PROPS)
+        deals = await _fetch_objects("deals", body)
+
         for deal in deals:
             title, msg, fields, url = build_deal_fields(deal)
             slack.send(title=title, message=msg, event_type="HubSpot Deal", url=url, fields=fields)
             results["deals_sent"] += 1
+
+        _update_latest("last_deal_time", deals)
     except Exception as e:
         results["errors"].append(f"Deals error: {e}")
 
-    # Check contacts
+    # ── Contacts ──
     try:
-        contacts = await get_recent_contacts(hours=hours)
+        since = _get_since("last_contact_time", fallback_hours)
+        body = _search_body("hs_lastmodifieddate", since, CONTACT_PROPS)
+        contacts = await _fetch_objects("contacts", body)
+
         for contact in contacts:
             title, msg, fields, url = build_contact_fields(contact)
             slack.send(title=title, message=msg, event_type="HubSpot Contact", url=url, fields=fields)
             results["contacts_sent"] += 1
+
+        _update_latest("last_contact_time", contacts)
     except Exception as e:
         results["errors"].append(f"Contacts error: {e}")
 

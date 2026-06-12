@@ -66,12 +66,12 @@ async def notify(req: NotifyRequest):
 
 
 @app.post("/trigger", response_model=TriggerResponse)
-async def trigger(hours: int = 24):
-    """Check HubSpot for recent activity and send notifications to Slack.
-    Use this endpoint in a cron job to get periodic updates.
+async def trigger(fallback_hours: int = 48):
+    """Check HubSpot for new activity (since last run) and send to Slack.
+    Use this endpoint in a cron job for periodic updates.
     """
     try:
-        result = await check_and_notify(hours=hours)
+        result = await check_and_notify(fallback_hours=fallback_hours)
         return TriggerResponse(
             ok=len(result["errors"]) == 0,
             deals_sent=result["deals_sent"],
