@@ -126,7 +126,7 @@ def build_deal_fields(deal: dict) -> tuple[str, str, list, str]:
         {"type": "mrkdwn", "text": f"*Stage:* {stage}"},
         {"type": "mrkdwn", "text": f"*Owner:* {owner}"},
     ]
-    url = f"https://app.hubspot.com/contacts/{slack.HUBSPOT_PORTAL_ID}/deal/{deal_id}"
+    url = f""
     return title, message, fields, url
 
 
@@ -147,7 +147,7 @@ def build_contact_fields(contact: dict) -> tuple[str, str, list, str]:
         {"type": "mrkdwn", "text": f"*Email:* {email}"},
         {"type": "mrkdwn", "text": f"*Lead Status:* {lead_status}"},
     ]
-    url = f"https://app.hubspot.com/contacts/{slack.HUBSPOT_PORTAL_ID}/contact/{contact_id}"
+    url = f""
     return title, message, fields, url
 
 

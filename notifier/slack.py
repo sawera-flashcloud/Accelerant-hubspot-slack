@@ -4,8 +4,6 @@ import httpx
 from typing import Optional
 
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
-HUBSPOT_PORTAL_ID = os.getenv("HUBSPOT_PORTAL_ID", "22606445")
-
 
 def send(title: str, message: str, event_type: str = "notification", url: Optional[str] = None, fields: Optional[list] = None) -> bool:
     """Send a notification to Slack. Returns True on success."""
@@ -24,7 +22,7 @@ def send(title: str, message: str, event_type: str = "notification", url: Option
     if url:
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"<{url}|Open in HubSpot>"}
+            "text": {"type": "mrkdwn", "text": f"<{url}|Open>"}
         })
 
     blocks.append({
